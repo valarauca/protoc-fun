@@ -28,12 +28,23 @@ fn pext(mask: u64, src: u64) -> u64 {
     ret
 }
 
+#[inline(always)]
+fn pdep(mask: u64, src: u64) -> u64 {
+    let mut ret: u64;
+    unsafe{
+        asm!("pdep rax, rsi, rdi"
+         : "={rax}"(ret)
+         : "{rsi}"(src), "{rdi}"(mask)
+         : "rax", "rdi", "rsi"
+         : "intel");
+    }
+    ret
+}
+
 #[test]
-fn test_pext() {
-    //ensure I understand wtf I'm doing
-    assert_eq!( pext(0xFF,0xFFFF), 0xFF);
-    assert_eq!( pext(0x00,0xFFFF), 0x00);
-    assert_eq!( pext(0xF80F,0xFFFF), 0x1FF);
+fn validate_pdep() {
+    //ensure I understand how this works
+    assert_eq!(pdep(0x7F7Fu64, 0x80u64), 0x0100u64);
 }
 
 /// Attempts to read a full length varint
@@ -41,7 +52,7 @@ fn test_pext() {
 /// This method will fail if the varint requires 10bytes,
 /// or the provided buffer is smaller then 8 bytes long.
 #[inline(always)]
-pub fn get_var_int(buffer: &[u8]) -> Option<u64> {
+pub fn decode_var_int(buffer: &[u8]) -> Option<u64> {
     unsafe {
         if unlikely(buffer.len() < 8) {
             return None;
@@ -64,52 +75,37 @@ pub fn get_var_int(buffer: &[u8]) -> Option<u64> {
     }
 }
 
-
-/// Attempts to read a 32bit varint
-///
-/// # None returned
-///
-/// * `buffer.len() < 8` this prevents fast dereference magic
-/// * var int is `>5` bytes long encoded. This means its `>u32::MAX`
-///
-/// # Weird edge case
-///
-/// If the value is `>u32::MAX` it'll be AND masked to `u32::MAX`.
-/// This _shouldnt_ happen, but the encoding standard allows it too.
-#[inline(always)]
-pub fn get_var_int32(buffer: &[u8]) -> Option<u32> {
-    unsafe {
-        if unlikely(buffer.len() < 8) {
-            return None;
-        }
-        let ptr: *const u8 = buffer.as_ptr();       
-        let value: u64 = read_unaligned(transmute(ptr));
-        let var = ctpop(value.clone() & MASK.clone());
-        let mask: u64 = match var {
-            0 => 0x7F,
-            1 => 0x7F7F,
-            2 => 0x7F7F7F,
-            3 => 0x7F7F7F7F,
-            4 => 0x7F7F7F7F7F,
-            5 => 0x7F7F7F7F7F7F,
-            _ => return None
-        };
-        let var = pext(mask,value) & (u32::MAX as u64);
-        Some(var as u32)
+/// Failes to encode values that are longer then 8bytes
+pub fn encode_var_int(x: u64) -> Option<Vec<u8>> {
+    let (mask,finalize) = match (x.clone()) {
+        0...0x7F => (0x7F,0x00),
+        0x80...0x3FFF => (0x7F7F,0x8000),
+        0x4000...0x1FFFFF => (0x7F7F7F,0x808000),
+        0x200000...0xFFFFFFF => (0x7F7F7F7F,0x80808000),
+        0x10000000...0x7FFFFFFFF => (0x7F7F7F7F7F,0x8080808000),
+        0x800000000...0x3FFFFFFFFFF => (0x7F7F7F7F7F7F,0x808080808000),
+        0x40000000000...0x1FFFFFFFFFFFF => (0x7F7F7F7F7F7F7F,0x80808080808000),
+        0x2000000000000...0xFFFFFFFFFFFFFF => (0x7F7F7F7F7F7F7F7F,0x8080808080808000),
+        _ => return None
+    };
+    let out = pdep(mask,x) | finalize;
+    let ptr: &[u8] = unsafe{transmute( (&out, 8usize))};
+    let mut v = ptr.to_vec(); 
+    for _ in v.len()..8 {
+        v.push(0u8);
     }
+    Some(v)
 }
 
-
-
 #[test]
-pub fn test_get_var_int() {
+pub fn test_decode_var_int() {
 
     macro_rules! do_test {
         ($arr: expr, $val: expr) => {
             if $arr.len() != 8 {
                 panic!("Length of {} is not 8 but {:?}", stringify!($arr), $arr.len());
             }
-            match get_var_int($arr) {
+            match decode_var_int($arr) {
                 Option::None => panic!("Array {} contents {:?} returned None", stringify!($arr), $arr),
                 Option::Some(var) => {
                     if var != $val {
@@ -143,7 +139,25 @@ pub fn test_get_var_int() {
 }
 
 
+#[test]
+pub fn reflect_value() {
 
+    for i in 0..::std::u32::MAX {
+        let var = i as u64;
+        let buf = match encode_var_int(var.clone()) {
+            Option::None => panic!("Failed to encode {:?}", var.clone()),
+            Option::Some(x) => x,
+        };
+        match decode_var_int(&buf) {
+            Option::None => panic!("Decode arr {:?} paniced on value {:?}", &buf, &var),
+            Option::Some(out) => {
+                if out != var {
+                    panic!("Value in was {:?} array was {:?} value out was {:?}", var, &buf, out); 
+                }
+            }
+        };
+    }
+}
 
 
 
