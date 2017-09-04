@@ -1,0 +1,6 @@
+[package]
+name = "protoc-fun"
+version = "0.1.0"
+authors = ["valarauca <valarauca@localhost.localdomain>"]
+
+[dependencies]
